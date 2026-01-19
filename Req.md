@@ -1,0 +1,1 @@
+create simple go program validate the json file in config folder 

@@ -1,0 +1,12 @@
+{
+  "app_name": "github-action-prototype",
+  "version": "1.0.0",
+  "environment": "production",
+  "port": 8080,
+  "log_level": "info",
+  "features": {
+    "enable_cache": true,
+    "enable_metrics": true,
+    "enable_tracing": false
+  }
+}
