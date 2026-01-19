@@ -6,6 +6,20 @@ on:
     branches: [ develop, main, 'release/**', 'release-**' ]
   pull_request:
     branches: [ develop, main ]
+  schedule:
+    # Monday at 8:00 AM UTC (cron: minute hour day-of-month month day-of-week)
+    - cron: '0 8 * * 1'
+    # Tuesday at 8:00 PM UTC (20:00)
+    - cron: '0 20 * * 2'
+    # Wednesday at 10:00 PM UTC (22:00)
+    - cron: '0 22 * * 3'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual trigger'
+        required: false
+        default: 'Manual execution'
+        type: string
 
 jobs:
   go-test-build:
@@ -21,6 +35,13 @@ jobs:
           echo "========================================"
           echo "Starting CI/CD Pipeline"
           echo "========================================"
+          echo "Trigger: ${{ github.event_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual Trigger Reason: ${{ github.event.inputs.reason }}"
+          fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Scheduled Run"
+          fi
           echo "Branch: ${{ github.ref_name }}"
           echo "Commit: ${{ github.sha }}"
           echo "Repository: ${{ github.repository }}"
