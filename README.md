@@ -45,13 +45,36 @@ GitHub Actions uses standard cron syntax:
 
 # local testing - act 
 
-github -  gh workflow run cicd.yaml  [brew install gh]
-local  -  act 'workflow_dispatch' -W .github/workflows/cicd.yaml  [brew install act] (~github local simulator)
+github -  gh workflow run cron-job.yaml  [brew install gh]
+local  -  act 'workflow_dispatch' -W .github/workflows/cron-job.yaml  [brew install act] (~github local simulator)
 
 
-# File copy 
+# Teleport File copy 
  act 'workflow_dispatch' -W .github/workflows/teleport-deploy.yaml --container-options "-v $HOME/.tsh:/root/.tsh:ro" --container-architecture linux/amd64 --eventpath event.json
 
-ls file 
+# Teleport ls file 
 
 act 'workflow_dispatch' -W .github/workflows/teleport-ls.yaml --container-options "-v $HOME/.tsh:/root/.tsh:ro" --container-architecture linux/amd64 --eventpath event.json
+
+
+
+# Run only one job at a time
+gh workflow run manual-trigger.yaml
+gh workflow run manual-trigger.yaml
+
+# Manual trigger with force deploy (GitHub)
+gh workflow run teleport-scheduled-rollout.yaml -f force_deploy=true
+
+# Deploy specific group (GitHub)
+gh workflow run teleport-scheduled-rollout.yaml -f deployment_group=group1
+
+# Retry specific deployment (GitHub)
+gh workflow run retry-failed-deployments.yaml -f original_deployment_id=deploy-20260120-123456
+
+# Scheduled Rollout (local test)
+act 'workflow_dispatch' -W .github/workflows/teleport-scheduled-rollout.yaml --container-options "-v $HOME/.tsh:/root/.tsh:ro" --container-architecture linux/amd64  [ runs on offpeak hours]
+
+act 'workflow_dispatch' -W .github/workflows/teleport-scheduled-rollout.yaml --container-options "-v $HOME/.tsh:/root/.tsh:ro" --container-architecture linux/amd64 --eventpath event_config.json [force trigger]
+
+# Retry Failed Deployments (local test)
+act 'workflow_dispatch' -W .github/workflows/retry-failed-deployments.yaml --container-options "-v $HOME/.tsh:/root/.tsh:ro" --container-architecture linux/amd64 

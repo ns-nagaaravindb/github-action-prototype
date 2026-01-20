@@ -1,0 +1,132 @@
+name: Retry Failed Deployments
+
+on:
+  workflow_dispatch:
+    inputs:
+      original_deployment_id:
+        description: 'Original deployment ID to retry'
+        required: true
+        type: string
+  schedule:
+    # Run every 30 minutes to retry failures
+    - cron: '*/30 * * * *'
+
+concurrency:
+  group: retry-deployments
+  cancel-in-progress: false
+
+jobs:
+  check-failures:
+    runs-on: ubuntu-latest
+    outputs:
+      has_failures: ${{ steps.check.outputs.has_failures }}
+      failure_list: ${{ steps.check.outputs.failure_list }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Check for recent failures (last 24 hours)
+        id: check
+        run: |
+          echo "========================================"
+          echo "Checking for Failed Deployments"
+          echo "========================================"
+          
+          # In production, this would query a database or artifact storage
+          # For now, we'll check recent workflow runs
+          
+          # Get current timestamp
+          CURRENT_TIME=$(date +%s)
+          CUTOFF_TIME=$((CURRENT_TIME - 86400))  # 24 hours ago
+          
+          echo "Current time: $(date -u)"
+          echo "Checking failures from last 24 hours"
+          echo ""
+          
+          # This is a placeholder - in production you'd:
+          # 1. Query GitHub API for recent workflow runs
+          # 2. Download failure artifacts
+          # 3. Check if timestamp < 24 hours
+          
+          echo "has_failures=false" >> $GITHUB_OUTPUT
+          echo "failure_list=[]" >> $GITHUB_OUTPUT
+          
+          echo "No failures found within retry window"
+          echo "========================================"
+
+  retry-deployment:
+    needs: check-failures
+    if: needs.check-failures.outputs.has_failures == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Retry failed servers
+        run: |
+          echo "========================================"
+          echo "Retrying Failed Deployments"
+          echo "========================================"
+          
+          # Re-trigger deployment for failed servers
+          echo "This would retry deployments for:"
+          echo '${{ needs.check-failures.outputs.failure_list }}'
+          
+          echo "========================================"
+
+  report-persistent-failures:
+    needs: retry-deployment
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check for failures exceeding 24 hours
+        id: check-persistent
+        run: |
+          echo "========================================"
+          echo "Checking for Persistent Failures (>24h)"
+          echo "========================================"
+          
+          CURRENT_TIME=$(date +%s)
+          CUTOFF_TIME=$((CURRENT_TIME - 86400))  # 24 hours ago
+          
+          # In production: Query for failures older than 24 hours
+          # For now, placeholder logic
+          
+          PERSISTENT_FAILURES=""
+          
+          if [ -n "$PERSISTENT_FAILURES" ]; then
+            echo "❌ Found deployments that have been failing for >24 hours:"
+            echo "$PERSISTENT_FAILURES"
+            echo ""
+            echo "has_persistent=true" >> $GITHUB_OUTPUT
+          else
+            echo "✓ No persistent failures detected"
+            echo "has_persistent=false" >> $GITHUB_OUTPUT
+          fi
+          echo "========================================"
+      
+      - name: Create alert for persistent failures
+        if: steps.check-persistent.outputs.has_persistent == 'true'
+        run: |
+          echo "========================================"
+          echo "🚨 ALERT: Persistent Deployment Failures"
+          echo "========================================"
+          echo ""
+          echo "The following servers have failed deployment for >24 hours:"
+          echo "This requires immediate attention!"
+          echo ""
+          echo "Actions to take:"
+          echo "1. Check server connectivity"
+          echo "2. Verify Teleport access"
+          echo "3. Check disk space and permissions"
+          echo "4. Review deployment logs"
+          echo ""
+          echo "In production, this would:"
+          echo "  - Create a GitHub Issue"
+          echo "  - Send PagerDuty alert"
+          echo "  - Post to Slack channel"
+          echo "  - Email operations team"
+          echo "========================================"

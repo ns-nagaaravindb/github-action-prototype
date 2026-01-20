@@ -1,0 +1,6 @@
+{
+  "inputs": {
+    "force_deploy": true,
+    "deployment_group": ""
+  }
+}

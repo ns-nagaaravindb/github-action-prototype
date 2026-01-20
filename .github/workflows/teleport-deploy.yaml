@@ -28,10 +28,17 @@ on:
         default: 'config/*.json'
         type: string
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   teleport-deploy:
     runs-on: ubuntu-latest
-    # For local execution with act, this will run on your MacBook
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'CM-')) ||
+      (github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'CM-'))
     
     steps:
       - name: Checkout code

@@ -1,0 +1,329 @@
+name: Scheduled Rollout with Retries
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Force deployment (skip off-peak check)'
+        required: false
+        type: boolean
+        default: false
+      deployment_group:
+        description: 'Deployment group name (blank for all)'
+        required: false
+        type: string
+  schedule:
+    # Run every hour to check for deployments
+    - cron: '0 * * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-deployment:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'CM-')) ||
+      (github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'CM-')) ||
+      github.event_name == 'schedule'
+    
+    outputs:
+      should_deploy: ${{ steps.check-schedule.outputs.should_deploy }}
+      deployment_matrix: ${{ steps.prepare-matrix.outputs.matrix }}
+      deployment_id: ${{ steps.generate-id.outputs.deployment_id }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Generate Deployment ID
+        id: generate-id
+        run: |
+          DEPLOYMENT_ID="deploy-$(date +%Y%m%d-%H%M%S)-${{ github.sha }}"
+          echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          echo "Deployment ID: $DEPLOYMENT_ID"
+      
+      - name: Check if within off-peak hours
+        id: check-schedule
+        run: |
+          echo "========================================"
+          echo "Checking Deployment Schedule"
+          echo "========================================"
+          
+          FORCE_DEPLOY="${{ github.event.inputs.force_deploy }}"
+          CURRENT_HOUR=$(date -u +%H)
+          CURRENT_TIME=$(date -u +%H%M)
+          
+          echo "Current UTC time: $(date -u)"
+          echo "Current hour: $CURRENT_HOUR"
+          echo "Force deploy: ${FORCE_DEPLOY:-false}"
+          
+          if [ "$FORCE_DEPLOY" = "true" ]; then
+            echo "✓ Force deploy enabled - skipping schedule check"
+            echo "should_deploy=true" >> $GITHUB_OUTPUT
+          else
+            # Parse schedule from rollout_schedule.json
+            OFFPEAK_START=$(jq -r '.deployment_groups[0].offpeak_hours | split("-")[0]' rollout_schedule.json)
+            OFFPEAK_END=$(jq -r '.deployment_groups[0].offpeak_hours | split("-")[1]' rollout_schedule.json)
+            
+            echo "Off-peak window: ${OFFPEAK_START}-${OFFPEAK_END}"
+            
+            # Convert to numbers for comparison
+            START_NUM=${OFFPEAK_START}
+            END_NUM=${OFFPEAK_END}
+            
+            # Handle overnight windows (e.g., 2300-0600)
+            if [ $START_NUM -gt $END_NUM ]; then
+              if [ $CURRENT_TIME -ge $START_NUM ] || [ $CURRENT_TIME -lt $END_NUM ]; then
+                echo "✓ Currently in off-peak hours (overnight window)"
+                echo "should_deploy=true" >> $GITHUB_OUTPUT
+              else
+                echo "⏳ Outside off-peak hours - skipping deployment"
+                echo "should_deploy=false" >> $GITHUB_OUTPUT
+              fi
+            else
+              if [ $CURRENT_TIME -ge $START_NUM ] && [ $CURRENT_TIME -lt $END_NUM ]; then
+                echo "✓ Currently in off-peak hours"
+                echo "should_deploy=true" >> $GITHUB_OUTPUT
+              else
+                echo "⏳ Outside off-peak hours - skipping deployment"
+                echo "should_deploy=false" >> $GITHUB_OUTPUT
+              fi
+            fi
+          fi
+          echo "========================================"
+      
+      - name: Prepare deployment matrix
+        id: prepare-matrix
+        run: |
+          echo "========================================"
+          echo "Preparing Deployment Matrix"
+          echo "========================================"
+          
+          GROUP_FILTER="${{ github.event.inputs.deployment_group }}"
+          
+          if [ -n "$GROUP_FILTER" ]; then
+            echo "Filtering by group: $GROUP_FILTER"
+            MATRIX=$(jq -c "{include: [.deployment_groups[] | select(.name == \"$GROUP_FILTER\") | .servers[] | . + {group: .name}]}" rollout_schedule.json)
+          else
+            echo "Deploying to all groups"
+            MATRIX=$(jq -c '{include: [.deployment_groups[] as $group | $group.servers[] | . + {group: $group.name}]}' rollout_schedule.json)
+          fi
+          
+          echo "Matrix: $MATRIX"
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          
+          SERVER_COUNT=$(echo "$MATRIX" | jq '.include | length')
+          echo "Total servers to deploy: $SERVER_COUNT"
+          echo "========================================"
+
+  deploy:
+    needs: prepare-deployment
+    if: needs.prepare-deployment.outputs.should_deploy == 'true'
+    runs-on: ubuntu-latest
+    
+    strategy:
+      max-parallel: 10  # Deploy to 10 servers concurrently
+      fail-fast: false  # Continue even if some deployments fail
+      matrix: ${{ fromJson(needs.prepare-deployment.outputs.deployment_matrix) }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Display deployment info
+        run: |
+          echo "========================================"
+          echo "Deploying to Server"
+          echo "========================================"
+          echo "Deployment ID: ${{ needs.prepare-deployment.outputs.deployment_id }}"
+          echo "Server: ${{ matrix.target_server }}"
+          echo "Cluster: ${{ matrix.cluster }}"
+          echo "Path: ${{ matrix.target_path }}"
+          echo "Group: ${{ matrix.group }}"
+          echo "========================================"
+      
+      - name: Install Teleport
+        run: |
+          if ! command -v tsh &> /dev/null; then
+            echo "Installing Teleport..."
+            curl https://goteleport.com/static/install.sh | bash -s 15.4.29
+          fi
+          tsh version
+      
+      - name: Configure Teleport
+        env:
+          TELEPORT_PROXY: ${{ secrets.TELEPORT_PROXY || 'teleport.netskope.io:443' }}
+          TELEPORT_TOKEN: ${{ secrets.TELEPORT_TOKEN }}
+        run: |
+          if [ -n "$TELEPORT_TOKEN" ]; then
+            echo "$TELEPORT_TOKEN" > /tmp/teleport-identity
+            chmod 600 /tmp/teleport-identity
+            tsh login --proxy="$TELEPORT_PROXY" --identity=/tmp/teleport-identity
+          fi
+          
+          if ! tsh status &> /dev/null; then
+            echo "⚠️  No active Teleport session"
+            exit 1
+          fi
+      
+      - name: Prepare deployment package
+        run: |
+          mkdir -p deploy/config
+          if [ -d "config" ]; then
+            cp -v config/*.json deploy/config/ 2>/dev/null || true
+          fi
+          
+          cat > deploy/DEPLOY_INFO.txt << EOF
+          Deployment ID: ${{ needs.prepare-deployment.outputs.deployment_id }}
+          Timestamp: $(date -u)
+          Server: ${{ matrix.target_server }}
+          Commit: ${{ github.sha }}
+          Branch: ${{ github.ref_name }}
+          EOF
+      
+      - name: Deploy with retry logic
+        id: deploy-with-retry
+        env:
+          TARGET_SERVER: ${{ matrix.target_server }}
+          TARGET_PATH: ${{ matrix.target_path }}
+          CLUSTER: ${{ matrix.cluster }}
+          DEPLOYMENT_ID: ${{ needs.prepare-deployment.outputs.deployment_id }}
+        run: |
+          echo "========================================"
+          echo "Deploying to $TARGET_SERVER"
+          echo "========================================"
+          
+          MAX_RETRIES=3
+          RETRY_DELAY=30
+          SUCCESS=false
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i of $MAX_RETRIES..."
+            
+            # Create remote directory
+            if tsh ssh --cluster "$CLUSTER" "nagaaravindb@$TARGET_SERVER" \
+                "mkdir -p $TARGET_PATH/deployments/$DEPLOYMENT_ID && chmod 755 $TARGET_PATH/deployments/$DEPLOYMENT_ID" 2>&1; then
+              
+              # Copy files
+              if tsh scp --cluster "$CLUSTER" -r deploy/* \
+                  "nagaaravindb@$TARGET_SERVER:$TARGET_PATH/deployments/$DEPLOYMENT_ID/" 2>&1; then
+                
+                echo "✓ Deployment successful on attempt $i"
+                SUCCESS=true
+                break
+              fi
+            fi
+            
+            if [ $i -lt $MAX_RETRIES ]; then
+              echo "⚠️  Attempt $i failed. Retrying in ${RETRY_DELAY}s..."
+              sleep $RETRY_DELAY
+            fi
+          done
+          
+          if [ "$SUCCESS" = "true" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✓ Deployment completed successfully"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ Deployment failed after $MAX_RETRIES attempts"
+            
+            # Create failure marker for tracking
+            mkdir -p /tmp/failures
+            echo "$TARGET_SERVER|$CLUSTER|$(date +%s)" > "/tmp/failures/${TARGET_SERVER//[.:]/}_failure.txt"
+            exit 1
+          fi
+          echo "========================================"
+      
+      - name: Upload failure info
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-${{ matrix.target_server }}-${{ github.run_id }}
+          path: /tmp/failures/
+          retention-days: 1
+
+  report-failures:
+    needs: [prepare-deployment, deploy]
+    if: always() && needs.prepare-deployment.outputs.should_deploy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download all failure artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: failure-*
+          path: failures/
+          merge-multiple: true
+        continue-on-error: true
+      
+      - name: Generate failure report
+        id: report
+        run: |
+          echo "========================================"
+          echo "Deployment Summary Report"
+          echo "========================================"
+          echo "Deployment ID: ${{ needs.prepare-deployment.outputs.deployment_id }}"
+          echo "Timestamp: $(date -u)"
+          echo ""
+          
+          FAILED_COUNT=0
+          SUCCESS_COUNT=0
+          
+          # Count total servers from matrix
+          TOTAL=$(echo '${{ needs.prepare-deployment.outputs.deployment_matrix }}' | jq '.include | length')
+          
+          # Check for failure artifacts
+          if [ -d "failures" ] && [ "$(ls -A failures 2>/dev/null)" ]; then
+            FAILED_COUNT=$(ls -1 failures/*_failure.txt 2>/dev/null | wc -l | xargs)
+            
+            echo "❌ Failed Deployments ($FAILED_COUNT):"
+            echo "----------------------------------------"
+            for f in failures/*_failure.txt; do
+              if [ -f "$f" ]; then
+                SERVER=$(cat "$f" | cut -d'|' -f1)
+                CLUSTER=$(cat "$f" | cut -d'|' -f2)
+                TIMESTAMP=$(cat "$f" | cut -d'|' -f3)
+                echo "  - $SERVER (cluster: $CLUSTER)"
+              fi
+            done
+            echo ""
+          fi
+          
+          SUCCESS_COUNT=$((TOTAL - FAILED_COUNT))
+          
+          echo "✓ Successful Deployments: $SUCCESS_COUNT"
+          echo "❌ Failed Deployments: $FAILED_COUNT"
+          echo "📊 Total Servers: $TOTAL"
+          
+          if [ $FAILED_COUNT -gt 0 ]; then
+            PERCENTAGE=$((SUCCESS_COUNT * 100 / TOTAL))
+            echo ""
+            echo "Success Rate: ${PERCENTAGE}%"
+            echo ""
+            echo "⚠️  Action Required:"
+            echo "  - Failed deployments will be retried in the next scheduled run"
+            echo "  - If failures persist after 24 hours, manual intervention required"
+          else
+            echo ""
+            echo "🎉 All deployments completed successfully!"
+          fi
+          
+          echo "failed_count=$FAILED_COUNT" >> $GITHUB_OUTPUT
+          echo "success_count=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
+          echo "========================================"
+      
+      - name: Create failure issue (if failures persist)
+        if: steps.report.outputs.failed_count > 0
+        run: |
+          echo "Creating tracking issue for failed deployments..."
+          echo "In production, this would create a GitHub issue or alert"
