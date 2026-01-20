@@ -1,0 +1,7 @@
+{
+  "inputs": {
+    "target_server": "eventforwarder01.qa01-dp-npe.nc1.iad0.nsscloud.net",
+    "cluster": "iad0",
+    "target_path": "/tmp"
+  }
+}

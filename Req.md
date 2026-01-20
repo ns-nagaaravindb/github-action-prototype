@@ -1,1 +1,0 @@
-GitHub action schedule on week Monday morning 8 am and Tuesday 8pm and Wednesday 10 pm  along with workflow dispatch feature to trigger it manually 
