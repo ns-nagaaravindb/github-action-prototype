@@ -1,0 +1,173 @@
+name: Teleport List Files
+
+on:
+  workflow_dispatch:
+    inputs:
+      directory:
+        description: 'Directory to list'
+        required: false
+        default: '/tmp'
+        type: string
+      cluster:
+        description: 'Teleport cluster name'
+        required: false
+        default: 'iad0'
+        type: string
+
+jobs:
+  list-files:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Read server configuration
+        id: server-config
+        run: |
+          echo "========================================"
+          echo "Reading server configuration"
+          echo "========================================"
+          
+          # Read server from server.txt (first non-comment, non-empty line)
+          SERVER=$(grep -v '^#' server.txt | grep -v '^[[:space:]]*$' | head -1 | xargs)
+          
+          if [ -z "$SERVER" ]; then
+            echo "❌ Error: No server found in server.txt"
+            exit 1
+          fi
+          
+          echo "server=$SERVER" >> $GITHUB_OUTPUT
+          
+          CLUSTER="${{ github.event.inputs.cluster }}"
+          if [ -z "$CLUSTER" ]; then
+            CLUSTER="iad0"
+          fi
+          echo "cluster=$CLUSTER" >> $GITHUB_OUTPUT
+          
+          DIRECTORY="${{ github.event.inputs.directory }}"
+          if [ -z "$DIRECTORY" ]; then
+            DIRECTORY="/tmp"
+          fi
+          echo "directory=$DIRECTORY" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "Configuration:"
+          echo "  Server: $SERVER"
+          echo "  Cluster: $CLUSTER"
+          echo "  Directory: $DIRECTORY"
+          echo "========================================"
+
+      - name: Install Teleport
+        run: |
+          echo "========================================"
+          echo "Installing Teleport (tsh)"
+          echo "========================================"
+          
+          if command -v tsh &> /dev/null; then
+            echo "✓ Teleport is already installed"
+            tsh version
+          else
+            echo "Installing Teleport on Linux..."
+            curl https://goteleport.com/static/install.sh | bash -s 15.4.29
+            echo "✓ Teleport installed successfully"
+            tsh version
+          fi
+          echo "========================================"
+      
+      - name: Configure Teleport for GitHub Actions
+        env:
+          TELEPORT_PROXY: ${{ secrets.TELEPORT_PROXY || 'teleport.netskope.io:443' }}
+          TELEPORT_TOKEN: ${{ secrets.TELEPORT_TOKEN }}
+        run: |
+          echo "========================================"
+          echo "Configuring Teleport for GitHub Actions"
+          echo "========================================"
+          
+          if [ -n "$TELEPORT_TOKEN" ]; then
+            # Write identity file
+            echo "$TELEPORT_TOKEN" > /tmp/teleport-identity
+            chmod 600 /tmp/teleport-identity
+            
+            # Login with identity file
+            tsh login --proxy="$TELEPORT_PROXY" --identity=/tmp/teleport-identity
+            
+            echo "✓ Logged in via identity token"
+            tsh status
+          else
+            echo "⚠️  No TELEPORT_TOKEN secret configured"
+            echo "Skipping GitHub Actions authentication (will use local session)"
+          fi
+          echo "========================================"
+      
+      - name: Check Teleport Session (for act local execution)
+        run: |
+          echo "========================================"
+          echo "Checking Teleport Session"
+          echo "========================================"
+          
+          if tsh status &> /dev/null; then
+            echo "✓ Active Teleport session found"
+            tsh status
+          else
+            echo "⚠️  No active Teleport session"
+            echo ""
+            echo "For local execution with act:"
+            echo "  1. Login: tsh login --proxy=teleport.netskope.io:443"
+            echo "  2. Run: act 'workflow_dispatch' -W .github/workflows/teleport-ls.yaml \\"
+            echo "          --container-options \"-v \$HOME/.tsh:/root/.tsh:ro\" \\"
+            echo "          --container-architecture linux/amd64 \\"
+            echo "          --eventpath event.json"
+            echo ""
+            echo "For GitHub Actions runner:"
+            echo "  Configure these secrets:"
+            echo "    - TELEPORT_PROXY (e.g., teleport.netskope.io:443)"
+            echo "    - TELEPORT_TOKEN (identity file content)"
+            echo ""
+            exit 1
+          fi
+          echo "========================================"
+
+      - name: List files on remote server
+        env:
+          TARGET_SERVER: ${{ steps.server-config.outputs.server }}
+          CLUSTER: ${{ steps.server-config.outputs.cluster }}
+          DIRECTORY: ${{ steps.server-config.outputs.directory }}
+        run: |
+          echo "========================================"
+          echo "Listing Files via Teleport"
+          echo "========================================"
+          echo "Server: $TARGET_SERVER"
+          echo "Cluster: $CLUSTER"
+          echo "Directory: $DIRECTORY"
+          echo ""
+          
+          echo "Executing: ls -lah $DIRECTORY"
+          echo "----------------------------------------"
+          
+          if tsh ssh --cluster "$CLUSTER" "nagaaravindb@$TARGET_SERVER" "ls -lah $DIRECTORY" 2>&1; then
+            echo "----------------------------------------"
+            echo "✓ Command executed successfully"
+          else
+            echo "----------------------------------------"
+            echo "❌ Command failed"
+            exit 1
+          fi
+          
+          echo "========================================"
+
+      - name: Summary
+        env:
+          TARGET_SERVER: ${{ steps.server-config.outputs.server }}
+          CLUSTER: ${{ steps.server-config.outputs.cluster }}
+          DIRECTORY: ${{ steps.server-config.outputs.directory }}
+        run: |
+          echo "========================================"
+          echo "Summary"
+          echo "========================================"
+          echo "✓ Connected to: $TARGET_SERVER (cluster: $CLUSTER)"
+          echo "✓ Listed directory: $DIRECTORY"
+          echo ""
+          echo "To connect manually:"
+          echo "  tsh ssh --cluster $CLUSTER nagaaravindb@$TARGET_SERVER"
+          echo "========================================"

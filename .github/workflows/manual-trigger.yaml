@@ -10,6 +10,10 @@ on:
         default: 'Manual execution'
         type: string
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+          
 jobs:
   go-test-build:
     #runs-on: arc-default-ub22-xs-set 

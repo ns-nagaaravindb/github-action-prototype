@@ -1,0 +1,5 @@
+1. only one job should run at point in time  
+2. CM ticket -> should create github action (cm ticket valdation)
+3. should run with 24 off peak hours 
+4. 200 DP ,partial success - retry the failed one within time window - report failed one (failed even after 24 hours)
+./utils/check_all_prod_hosts.sh inventories  "dpkg -l eventforwarder.ns | grep eventforwarder; sudo supervisorctl status"
