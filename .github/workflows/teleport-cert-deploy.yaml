@@ -1,0 +1,309 @@
+# .github/workflows/teleport-cert-deploy.yaml
+name: Teleport Deploy with Certificate Auth
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      target_server:
+        description: 'Target server (overrides server.txt)'
+        required: false
+        type: string
+      cluster:
+        description: 'Teleport cluster name'
+        required: false
+        default: 'iad0'
+        type: string
+      target_path:
+        description: 'Target path on server'
+        required: false
+        default: '/tmp'
+        type: string
+      files_to_copy:
+        description: 'Files/patterns to copy (space-separated)'
+        required: false
+        default: 'config/*.json'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  teleport-cert-deploy:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'CM-')) ||
+      (github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'CM-'))
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Display deployment info
+        run: |
+          echo "========================================"
+          echo "Teleport Certificate-Based Deployment"
+          echo "========================================"
+          echo "Trigger: ${{ github.event_name }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Target Server: ${{ github.event.inputs.target_server }}"
+            echo "Target Path: ${{ github.event.inputs.target_path }}"
+            echo "Files to Copy: ${{ github.event.inputs.files_to_copy }}"
+          fi
+          echo "========================================"
+
+      - name: Read server configuration
+        id: server-config
+        run: |
+          echo "========================================"
+          echo "Reading server configuration"
+          echo "========================================"
+          
+          # Read server from server.txt (first non-comment, non-empty line)
+          SERVER=$(grep -v '^#' server.txt | grep -v '^[[:space:]]*$' | head -1 | xargs)
+          
+          # Override with workflow input if provided
+          if [ -n "${{ github.event.inputs.target_server }}" ]; then
+            SERVER="${{ github.event.inputs.target_server }}"
+            echo "Using workflow input server: $SERVER"
+          else
+            echo "Using server from server.txt: $SERVER"
+          fi
+          
+          # Set cluster (default to iad0 for Netskope)
+          CLUSTER="${{ github.event.inputs.cluster }}"
+          if [ -z "$CLUSTER" ]; then
+            CLUSTER="iad0"
+          fi
+          
+          # Set target path
+          TARGET_PATH="${{ github.event.inputs.target_path }}"
+          if [ -z "$TARGET_PATH" ]; then
+            TARGET_PATH="/tmp"
+          fi
+          
+          # Set files to copy
+          FILES_TO_COPY="${{ github.event.inputs.files_to_copy }}"
+          if [ -z "$FILES_TO_COPY" ]; then
+            FILES_TO_COPY="config/*.json"
+          fi
+          
+          echo "server=$SERVER" >> $GITHUB_OUTPUT
+          echo "cluster=$CLUSTER" >> $GITHUB_OUTPUT
+          echo "target_path=$TARGET_PATH" >> $GITHUB_OUTPUT
+          echo "files_to_copy=$FILES_TO_COPY" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "Configuration:"
+          echo "  Cluster: $CLUSTER"
+          echo "  Server: $SERVER"
+          echo "  Target Path: $TARGET_PATH"
+          echo "  Files: $FILES_TO_COPY"
+          echo "========================================"
+
+      - name: Install Teleport
+        run: |
+          echo "========================================"
+          echo "Installing Teleport (tsh)"
+          echo "========================================"
+          
+          if command -v tsh &> /dev/null; then
+            echo "✓ Teleport is already installed"
+            tsh version
+          else
+            echo "Installing Teleport..."
+            # Linux (Ubuntu/Debian)
+            echo "Installing Teleport on Linux..."
+            curl https://goteleport.com/static/install.sh | bash -s 15.4.29
+            
+            echo "✓ Teleport installed successfully"
+            tsh version
+          fi
+          echo "========================================"
+      
+      - name: Setup Teleport Certificate Authentication
+        env:
+          TELEPORT_PROXY: ${{ secrets.TELEPORT_PROXY || 'teleport.netskope.io:443' }}
+          TELEPORT_CERT: ${{ secrets.TELEPORT_CERT }}
+          TELEPORT_KEY: ${{ secrets.TELEPORT_KEY }}
+          TELEPORT_USER: ${{ secrets.TELEPORT_USER || 'nagaaravindb@netskope.com' }}
+        run: |
+          echo "========================================"
+          echo "Setting up Teleport Certificate Auth"
+          echo "========================================"
+          
+          # Create .tsh directory structure
+          mkdir -p $HOME/.tsh/keys/$TELEPORT_PROXY
+          
+          # Check if running locally with existing session
+          if tsh status &> /dev/null; then
+            echo "✓ Using existing Teleport session"
+            tsh status
+          else
+            echo "Setting up certificate-based authentication..."
+            
+            if [ -n "$TELEPORT_CERT" ] && [ -n "$TELEPORT_KEY" ]; then
+              # Extract cluster from proxy (remove port)
+              CLUSTER=$(echo $TELEPORT_PROXY | cut -d: -f1)
+              
+              # Write certificate and key files
+              echo "$TELEPORT_KEY" > $HOME/.tsh/keys/$TELEPORT_PROXY/$TELEPORT_USER
+              echo "$TELEPORT_CERT" > $HOME/.tsh/keys/$TELEPORT_PROXY/$TELEPORT_USER-cert.pub
+              
+              # Set proper permissions
+              chmod 600 $HOME/.tsh/keys/$TELEPORT_PROXY/$TELEPORT_USER
+              chmod 644 $HOME/.tsh/keys/$TELEPORT_PROXY/$TELEPORT_USER-cert.pub
+              
+              echo "✓ Certificate and key files created"
+              
+              # Verify certificate
+              echo ""
+              echo "Certificate details:"
+              ssh-keygen -L -f $HOME/.tsh/keys/$TELEPORT_PROXY/$TELEPORT_USER-cert.pub || true
+              
+              # Test connection
+              echo ""
+              echo "Testing Teleport connection..."
+              tsh --proxy=$TELEPORT_PROXY status || echo "⚠️  Connection test failed, but will continue..."
+              
+            else
+              echo "❌ Error: TELEPORT_CERT and TELEPORT_KEY secrets are required"
+              echo ""
+              echo "To generate and use certificates in GitHub Actions:"
+              echo "1. Generate certificate using tctl:"
+              echo "   tctl auth sign --format=openssh --ttl=10h --user=$TELEPORT_USER -o teleport_key"
+              echo ""
+              echo "2. This creates two files:"
+              echo "   - teleport_key (private key)"
+              echo "   - teleport_key-cert.pub (certificate)"
+              echo ""
+              echo "3. Add them as GitHub Secrets:"
+              echo "   - TELEPORT_KEY: content of teleport_key file"
+              echo "   - TELEPORT_CERT: content of teleport_key-cert.pub file"
+              echo "   - TELEPORT_PROXY: your teleport proxy address (e.g., teleport.netskope.io:443)"
+              echo "   - TELEPORT_USER: your teleport user email"
+              echo ""
+              echo "For local execution with act:"
+              echo "  1. Login manually: tsh login --proxy=$TELEPORT_PROXY"
+              echo "  2. Mount credentials: act -v \$HOME/.tsh:/root/.tsh:ro"
+              exit 1
+            fi
+          fi
+          echo "========================================"
+
+      - name: Prepare deployment package
+        run: |
+          echo "========================================"
+          echo "Preparing deployment package"
+          echo "========================================"
+          
+          mkdir -p deploy/config deploy/build
+          
+          # Copy files
+          if [ -d "config" ]; then
+            cp -v config/*.json deploy/config/ 2>/dev/null || echo "No JSON files in config/"
+          fi
+          
+          # Create deployment info
+          cat > deploy/DEPLOY_INFO.txt << EOF
+          Deployment Information
+          ======================
+          Timestamp: $(date -u)
+          Commit: ${{ github.sha }}
+          Branch: ${{ github.ref_name }}
+          Trigger: ${{ github.event_name }}
+          Auth Method: Certificate-based
+          
+          Files in package:
+          EOF
+          
+          find deploy -type f >> deploy/DEPLOY_INFO.txt
+          
+          echo ""
+          echo "Deployment package ready:"
+          find deploy -type f
+          echo "========================================"
+
+      - name: Deploy via Teleport (tsh scp)
+        env:
+          TARGET_SERVER: ${{ steps.server-config.outputs.server }}
+          TARGET_PATH: ${{ steps.server-config.outputs.target_path }}
+          CLUSTER: ${{ steps.server-config.outputs.cluster }}
+          TELEPORT_PROXY: ${{ secrets.TELEPORT_PROXY || 'teleport.netskope.io:443' }}
+        run: |
+          echo "========================================"
+          echo "Deploying files via Teleport (Certificate Auth)"
+          echo "========================================"
+          echo "Cluster: $CLUSTER"
+          echo "Target: $TARGET_SERVER:$TARGET_PATH"
+          echo ""
+          
+          # Check if target server is accessible
+          echo "Checking Teleport status..."
+          tsh --proxy=$TELEPORT_PROXY status
+          echo ""
+          
+          echo "Listing available nodes..."
+          tsh --proxy=$TELEPORT_PROXY --cluster=$CLUSTER ls || echo "⚠️  Unable to list nodes"
+          echo ""
+          
+          # Copy files
+          echo "Copying files..."
+          for file in deploy/**/*; do
+            if [ -f "$file" ]; then
+              echo "Uploading: $file"
+              tsh --proxy=$TELEPORT_PROXY --cluster=$CLUSTER scp "$file" "$TARGET_SERVER:$TARGET_PATH/" || {
+                echo "❌ Failed to copy $file"
+                exit 1
+              }
+            fi
+          done
+          
+          echo ""
+          echo "✓ Deployment completed successfully"
+          echo "========================================"
+      
+      - name: Verify deployment
+        env:
+          TARGET_SERVER: ${{ steps.server-config.outputs.server }}
+          TARGET_PATH: ${{ steps.server-config.outputs.target_path }}
+          CLUSTER: ${{ steps.server-config.outputs.cluster }}
+          TELEPORT_PROXY: ${{ secrets.TELEPORT_PROXY || 'teleport.netskope.io:443' }}
+        run: |
+          echo "========================================"
+          echo "Verifying deployment"
+          echo "========================================"
+          
+          echo "Listing files on target server:"
+          tsh --proxy=$TELEPORT_PROXY --cluster=$CLUSTER ssh "$TARGET_SERVER" "ls -lh $TARGET_PATH/" || {
+            echo "⚠️  Unable to verify files"
+          }
+          
+          echo ""
+          echo "Checking DEPLOY_INFO.txt:"
+          tsh --proxy=$TELEPORT_PROXY --cluster=$CLUSTER ssh "$TARGET_SERVER" "cat $TARGET_PATH/DEPLOY_INFO.txt" || {
+            echo "⚠️  Unable to read DEPLOY_INFO.txt"
+          }
+          
+          echo "========================================"
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "========================================"
+          echo "Deployment Summary"
+          echo "========================================"
+          echo "Workflow: ${{ github.workflow }}"
+          echo "Status: ${{ job.status }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Triggered by: ${{ github.event_name }}"
+          echo "Auth Method: Certificate-based (OpenSSH format)"
+          echo "========================================"

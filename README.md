@@ -71,10 +71,118 @@ gh workflow run teleport-scheduled-rollout.yaml -f deployment_group=group1
 # Retry specific deployment (GitHub)
 gh workflow run retry-failed-deployments.yaml -f original_deployment_id=deploy-20260120-123456
 
-# Scheduled Rollout (local test)
+# Scheduled Rollout to multiple server (local test)
 act 'workflow_dispatch' -W .github/workflows/teleport-scheduled-rollout.yaml --container-options "-v $HOME/.tsh:/root/.tsh:ro" --container-architecture linux/amd64  [ runs on offpeak hours]
 
 act 'workflow_dispatch' -W .github/workflows/teleport-scheduled-rollout.yaml --container-options "-v $HOME/.tsh:/root/.tsh:ro" --container-architecture linux/amd64 --eventpath event_config.json [force trigger]
 
 # Retry Failed Deployments (local test)
 act 'workflow_dispatch' -W .github/workflows/retry-failed-deployments.yaml --container-options "-v $HOME/.tsh:/root/.tsh:ro" --container-architecture linux/amd64 
+
+
+
+# Certificate Creation & GitHub Actions Setup
+
+## Generate Teleport Certificate
+
+```bash
+# Generate certificate with 10 hour TTL
+tctl auth sign --format=openssh --ttl=10h --user=nagaaravindb@netskope.com -o nagaaravindb_teleport
+
+# This creates two files:
+# -rw-------   1 nagaaravindb  staff        6786 20 Jan 18:51 nagaaravindb_teleport-cert.pub
+# -rw-------   1 nagaaravindb  staff        1679 20 Jan 18:51 nagaaravindb_teleport
+```
+
+## Setup GitHub Secrets for Certificate-Based Authentication
+
+To use certificate authentication in GitHub Actions, add these secrets to your repository:
+
+### 1. Go to Repository Settings
+- Navigate to: Settings → Secrets and variables → Actions → New repository secret
+
+### 2. Add Required Secrets
+
+**TELEPORT_KEY** (Private Key)
+```bash
+cat nagaaravindb_teleport
+# Copy the entire content and paste as secret
+```
+
+**TELEPORT_CERT** (Certificate)
+```bash
+cat nagaaravindb_teleport-cert.pub
+# Copy the entire content and paste as secret
+```
+
+**TELEPORT_PROXY** (Proxy Address)
+```
+teleport.netskope.io:443
+```
+
+**TELEPORT_USER** (Your Email)
+```
+nagaaravindb@netskope.com
+```
+
+## Using Certificate-Based Workflow
+
+### Via GitHub UI:
+1. Go to **Actions** → **Teleport Deploy with Certificate Auth**
+2. Click **Run workflow**
+3. Configure inputs (optional):
+   - Target server
+   - Cluster name (default: iad0)
+   - Target path (default: /tmp)
+   - Files to copy
+
+### Via GitHub CLI:
+```bash
+# Deploy using certificates
+gh workflow run teleport-cert-deploy.yaml
+
+# Deploy with custom server
+gh workflow run teleport-cert-deploy.yaml -f target_server=my-server.example.com
+
+# Deploy with custom path
+gh workflow run teleport-cert-deploy.yaml -f target_path=/opt/myapp
+```
+
+### Local Testing with act:
+```bash
+# Test locally (requires existing tsh session)
+act 'workflow_dispatch' -W .github/workflows/teleport-cert-deploy.yaml \
+  --container-options "-v $HOME/.tsh:/root/.tsh:ro" \
+  --container-architecture linux/amd64 \
+  --eventpath event.json
+```
+
+## Certificate Management
+
+### Regenerate Certificates
+Certificates expire based on the TTL. To regenerate:
+
+```bash
+# Generate new certificate with desired TTL
+tctl auth sign --format=openssh --ttl=24h --user=nagaaravindb@netskope.com -o nagaaravindb_teleport
+
+# Update GitHub secrets with new certificate content
+cat nagaaravindb_teleport-cert.pub  # Update TELEPORT_CERT
+cat nagaaravindb_teleport           # Update TELEPORT_KEY
+```
+
+### Check Certificate Expiry
+```bash
+# View certificate details
+ssh-keygen -L -f nagaaravindb_teleport-cert.pub
+
+# Look for "Valid: from X to Y" in output
+```
+
+### Security Best Practices
+- Use shortest practical TTL (e.g., 24h for CI/CD)
+- Rotate certificates regularly
+- Never commit certificate files to git
+- Use GitHub Secrets for storing credentials
+- Limit certificate principals/roles to minimum required
+ ```
